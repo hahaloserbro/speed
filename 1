@@ -1,0 +1,391 @@
+-- CarunoSpeedBtn v2 — ускорение авто + бесконечный бензин
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+if _G.CarunoSpeedBtn and type(_G.CarunoSpeedBtn.Destroy) == "function" then
+	pcall(_G.CarunoSpeedBtn.Destroy)
+end
+local old = playerGui:FindFirstChild("CarunoSpeedBtn")
+if old then old:Destroy() end
+
+local VehicleUtil
+do
+	local ok, module = pcall(function()
+		return require(
+			ReplicatedStorage
+				:WaitForChild("SharedModules", 10)
+				:WaitForChild("VehicleUtil", 10)
+		)
+	end)
+	if ok and type(module) == "table" then
+		VehicleUtil = module
+	end
+end
+
+local values = {
+	speedEnabled = false,
+	fuelEnabled = false,
+	speedMultiplier = 150,
+	minSpeed = 100,
+	maxSpeed = 400,
+	step = 10,
+}
+
+-- ================= UI =================
+local gui = Instance.new("ScreenGui")
+gui.Name = "CarunoSpeedBtn"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+local button = Instance.new("TextButton")
+button.Name = "SpeedBtn"
+button.Size = UDim2.fromOffset(60, 60)
+button.Position = UDim2.new(0.5, 80, 0.5, -120)
+button.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+button.BackgroundTransparency = 0.25
+button.BorderSizePixel = 0
+button.Text = ""
+button.AutoButtonColor = false
+button.Active = true
+button.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = button
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(90, 90, 100)
+stroke.Thickness = 1
+stroke.Transparency = 0.4
+stroke.Parent = button
+
+local icon = Instance.new("TextLabel")
+icon.Name = "Icon"
+icon.BackgroundTransparency = 1
+icon.Size = UDim2.fromScale(0.7, 0.7)
+icon.Position = UDim2.fromScale(0.15, 0.15)
+icon.Text = "⚡"
+icon.TextColor3 = Color3.fromRGB(255, 255, 255)
+icon.TextTransparency = 0.5
+icon.TextScaled = true
+icon.Font = Enum.Font.GothamBold
+icon.Parent = button
+
+-- Индикатор бензина (правый клик)
+local fuelDot = Instance.new("Frame")
+fuelDot.Name = "FuelDot"
+fuelDot.Size = UDim2.fromOffset(10, 10)
+fuelDot.Position = UDim2.new(1, -14, 0, 4)
+fuelDot.BackgroundColor3 = Color3.fromRGB(70, 70, 78)
+fuelDot.BorderSizePixel = 0
+fuelDot.Parent = button
+
+local dotCorner = Instance.new("UICorner")
+dotCorner.CornerRadius = UDim.new(1, 0)
+dotCorner.Parent = fuelDot
+
+-- Всплывающая плашка
+local tip = Instance.new("TextLabel")
+tip.Name = "Tip"
+tip.BackgroundColor3 = Color3.fromRGB(8, 8, 10)
+tip.BackgroundTransparency = 0.15
+tip.BorderSizePixel = 0
+tip.Visible = false
+tip.Size = UDim2.fromOffset(110, 22)
+tip.Position = UDim2.new(0.5, -55, 1, 6)
+tip.Text = "150%"
+tip.TextColor3 = Color3.fromRGB(247, 247, 249)
+tip.TextSize = 13
+tip.Font = Enum.Font.GothamMedium
+tip.Parent = button
+
+local tipCorner = Instance.new("UICorner")
+tipCorner.CornerRadius = UDim.new(0, 6)
+tipCorner.Parent = tip
+
+local function refreshVisual()
+	if values.speedEnabled then
+		button.BackgroundColor3 = Color3.fromRGB(22, 82, 52)
+		stroke.Color = Color3.fromRGB(88, 214, 134)
+	else
+		button.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+		stroke.Color = Color3.fromRGB(90, 90, 100)
+	end
+	fuelDot.BackgroundColor3 = values.fuelEnabled
+		and Color3.fromRGB(228, 178, 84)
+		or Color3.fromRGB(70, 70, 78)
+end
+
+local function refreshTip()
+	local parts = {}
+	parts[#parts + 1] = "Speed: " .. tostring(values.speedMultiplier) .. "%"
+	parts[#parts + 1] = "Fuel: " .. (values.fuelEnabled and "ON" or "OFF")
+	tip.Text = table.concat(parts, "  |  ")
+end
+
+-- ================= Перетаскивание + клики =================
+local dragging = false
+local dragStart, startPos
+
+local function onPress(input, isRightClick)
+	dragging = true
+	dragStart = input.Position
+	startPos = button.Position
+	local moved = false
+
+	local changedConn
+	changedConn = input.Changed:Connect(function()
+		if input.UserInputState ~= Enum.UserInputState.End then return end
+		dragging = false
+		if changedConn then changedConn:Disconnect() end
+		if not moved then
+			if isRightClick then
+				values.fuelEnabled = not values.fuelEnabled
+			else
+				values.speedEnabled = not values.speedEnabled
+				if not values.speedEnabled then
+					_G.CarunoSpeedBtn.restoreSpeed()
+				end
+			end
+			refreshVisual()
+			refreshTip()
+		end
+	end)
+
+	local moveConn
+	moveConn = UserInputService.InputChanged:Connect(function(mi)
+		if not dragging then
+			if moveConn then moveConn:Disconnect() end
+			return
+		end
+		if mi.UserInputType ~= Enum.UserInputType.MouseMovement
+			and mi.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		local delta = mi.Position - dragStart
+		if math.abs(delta.X) > 3 or math.abs(delta.Y) > 3 then
+			moved = true
+		end
+		button.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end)
+end
+
+button.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		onPress(input, false)
+	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+		onPress(input, true)
+	end
+end)
+
+-- ================= Hover + колесо =================
+local hovering = false
+button.MouseEnter:Connect(function()
+	hovering = true
+	tip.Visible = true
+	refreshTip()
+end)
+button.MouseLeave:Connect(function()
+	hovering = false
+	tip.Visible = false
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+	if not hovering then return end
+	local delta = math.clamp(input.Position.Z, -1, 1)
+	values.speedMultiplier = math.clamp(
+		values.speedMultiplier + delta * values.step,
+		values.minSpeed,
+		values.maxSpeed
+	)
+	refreshTip()
+end)
+
+-- ================= Автомобиль =================
+local function getDrivenVehicle()
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return nil, nil end
+	local vehicle
+	if VehicleUtil then
+		local ok, v = pcall(function()
+			return VehicleUtil:GetHumanoidDrivenVehicle(humanoid)
+		end)
+		if ok and v then vehicle = v end
+	end
+	if not vehicle then
+		local seat = humanoid.SeatPart
+		local vehicles = Workspace:FindFirstChild("Vehicles")
+		if seat and vehicles then
+			local obj = seat
+			while obj and obj.Parent ~= vehicles do obj = obj.Parent end
+			if obj and obj.Parent == vehicles and obj:IsA("Model") then
+				vehicle = obj
+			end
+		end
+	end
+	if not vehicle then return nil, nil end
+	local root = vehicle:FindFirstChild("Root")
+	if not (root and root:IsA("BasePart")) then
+		root = vehicle.PrimaryPart
+			or (humanoid.SeatPart and humanoid.SeatPart.AssemblyRootPart)
+	end
+	return vehicle, root
+end
+
+-- ================= Ускорение =================
+local VehicleAttrs = setmetatable({}, { __mode = "k" })
+
+local function boostVehicle(vehicle)
+	if not vehicle or not vehicle.Parent then return false end
+	local saved = VehicleAttrs[vehicle]
+	if not saved then
+		saved = {
+			Top = vehicle:GetAttribute("TopSpeedMultiplier"),
+			Power = vehicle:GetAttribute("EnginePowerMultiplier"),
+		}
+		VehicleAttrs[vehicle] = saved
+	end
+	local top = saved.Top
+	if type(top) ~= "number" or top <= 0 or top ~= top then top = 1 end
+	local power = saved.Power
+	if type(power) ~= "number" or power <= 0 or power ~= power then power = 1 end
+	local mult = math.clamp(values.speedMultiplier / 100, 1, 6)
+	local target = top * mult
+	local current = vehicle:GetAttribute("TopSpeedMultiplier")
+	if type(current) == "number" and math.abs(current - target) < 0.001 then
+		return true
+	end
+	return pcall(function()
+		vehicle:SetAttribute("TopSpeedMultiplier", target)
+		vehicle:SetAttribute("EnginePowerMultiplier", power * mult)
+	end)
+end
+
+local function restoreSpeed()
+	for vehicle, saved in pairs(VehicleAttrs) do
+		if vehicle and vehicle.Parent then
+			pcall(function()
+				vehicle:SetAttribute("TopSpeedMultiplier", saved.Top)
+				vehicle:SetAttribute("EnginePowerMultiplier", saved.Power)
+			end)
+		end
+		VehicleAttrs[vehicle] = nil
+	end
+end
+
+-- ================= Бесконечный бензин =================
+local fuelInfoTables = setmetatable({}, { __mode = "k" })
+local lastFuelInfoScan = 0
+
+local function scanFuelTables()
+	if type(getgc) ~= "function" then return end
+	local ok, objects = pcall(getgc, true)
+	if not ok or type(objects) ~= "table" then return end
+	for _, object in ipairs(objects) do
+		if type(object) == "table" then
+			pcall(function()
+				if type(rawget(object, "CurrentFuel")) == "number"
+					and type(rawget(object, "MaxFuel")) == "number"
+					and typeof(rawget(object, "Root")) == "Instance" then
+					fuelInfoTables[object] = true
+				end
+			end)
+		end
+	end
+end
+
+local function patchVehicleFuel(vehicle, root)
+	if not vehicle or not vehicle.Parent then return false end
+	local maxFuel = vehicle:GetAttribute("MaxFuel")
+	if type(maxFuel) ~= "number" or maxFuel <= 0 then
+		maxFuel = vehicle:GetAttribute("Fuel")
+	end
+	if type(maxFuel) ~= "number" or maxFuel <= 0 then return false end
+
+	pcall(function()
+		vehicle:SetAttribute("CurrentFuel", maxFuel)
+		vehicle:SetAttribute("Fuel", maxFuel)
+	end)
+
+	if lastFuelInfoScan == 0 or os.clock() - lastFuelInfoScan >= 1 then
+		lastFuelInfoScan = os.clock()
+		scanFuelTables()
+	end
+
+	for object in pairs(fuelInfoTables) do
+		if rawget(object, "Root") == root then
+			object.CurrentFuel = maxFuel
+			object.MaxFuel = maxFuel
+		end
+	end
+	return true
+end
+
+local fuelAccumulator = 0
+
+RunService.Heartbeat:Connect(function(delta)
+	if values.speedEnabled then
+		local vehicle = getDrivenVehicle()
+		if vehicle then boostVehicle(vehicle) end
+	end
+
+	if values.fuelEnabled then
+		fuelAccumulator = fuelAccumulator + delta
+		if fuelAccumulator >= 0.05 then
+			fuelAccumulator = 0
+			local vehicle, root = getDrivenVehicle()
+			if vehicle then
+				patchVehicleFuel(vehicle, root)
+			end
+		end
+	else
+		fuelAccumulator = 0
+	end
+end)
+
+-- ================= API =================
+_G.CarunoSpeedBtn = {
+	Destroy = function()
+		restoreSpeed()
+		table.clear(fuelInfoTables)
+		gui:Destroy()
+		_G.CarunoSpeedBtn = nil
+	end,
+	restoreSpeed = restoreSpeed,
+	SetSpeed = function(v)
+		values.speedMultiplier = math.clamp(v, values.minSpeed, values.maxSpeed)
+		refreshTip()
+	end,
+	GetSpeed = function() return values.speedMultiplier end,
+	ToggleSpeed = function()
+		values.speedEnabled = not values.speedEnabled
+		if not values.speedEnabled then restoreSpeed() end
+		refreshVisual()
+		refreshTip()
+	end,
+	ToggleFuel = function()
+		values.fuelEnabled = not values.fuelEnabled
+		refreshVisual()
+		refreshTip()
+	end,
+	IsSpeedOn = function() return values.speedEnabled end,
+	IsFuelOn = function() return values.fuelEnabled end,
+}
+
+refreshVisual()
+refreshTip()
+return _G.CarunoSpeedBtn

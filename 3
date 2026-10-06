@@ -1,0 +1,364 @@
+-- CarunoGhostBtn — антиколлизия с машинами (основное) + Anti PIT (уголок)
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+if _G.CarunoGhostBtn and _G.CarunoGhostBtn.Destroy then
+	pcall(_G.CarunoGhostBtn.Destroy)
+end
+local old = playerGui:FindFirstChild("CarunoGhostBtn")
+if old then old:Destroy() end
+
+-- ===== Состояние =====
+local values = { ghost = false, antiPit = false }
+
+-- forward declarations
+local refresh, startGhost, stopGhost, startAntiPit, stopAntiPit
+
+-- ===== UI =====
+local gui = Instance.new("ScreenGui")
+gui.Name = "CarunoGhostBtn"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = playerGui
+
+local button = Instance.new("TextButton")
+button.Size = UDim2.fromOffset(60, 60)
+button.Position = UDim2.new(0.5, -110, 0.5, -120)
+button.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+button.BackgroundTransparency = 0.25
+button.BorderSizePixel = 0
+button.Text = ""
+button.AutoButtonColor = false
+button.Parent = gui
+
+Instance.new("UICorner", button).CornerRadius = UDim.new(0, 14)
+local stroke = Instance.new("UIStroke", button)
+stroke.Color = Color3.fromRGB(90, 90, 100)
+stroke.Thickness = 1
+stroke.Transparency = 0.4
+
+-- Стикер призрака
+local icon = Instance.new("TextLabel", button)
+icon.BackgroundTransparency = 1
+icon.Size = UDim2.fromScale(0.7, 0.7)
+icon.Position = UDim2.fromScale(0.15, 0.15)
+icon.Text = "👻"
+icon.TextColor3 = Color3.fromRGB(255, 255, 255)
+icon.TextTransparency = 0.5
+icon.TextScaled = true
+icon.Font = Enum.Font.GothamBold
+
+-- Индикатор Anti PIT (правый верхний уголок)
+local pitDot = Instance.new("Frame", button)
+pitDot.Size = UDim2.fromOffset(10, 10)
+pitDot.Position = UDim2.new(1, -14, 0, 4)
+pitDot.BackgroundColor3 = Color3.fromRGB(70, 70, 78)
+pitDot.BorderSizePixel = 0
+Instance.new("UICorner", pitDot).CornerRadius = UDim.new(1, 0)
+
+-- Плашка при наведении
+local tip = Instance.new("TextLabel", button)
+tip.BackgroundColor3 = Color3.fromRGB(8, 8, 10)
+tip.BackgroundTransparency = 0.15
+tip.BorderSizePixel = 0
+tip.Visible = false
+tip.Size = UDim2.fromOffset(150, 22)
+tip.Position = UDim2.new(0.5, -75, 1, 6)
+tip.Text = "Ghost: OFF  |  AntiPIT: OFF"
+tip.TextColor3 = Color3.fromRGB(247, 247, 249)
+tip.TextSize = 13
+tip.Font = Enum.Font.GothamMedium
+Instance.new("UICorner", tip).CornerRadius = UDim.new(0, 6)
+
+refresh = function()
+	if values.ghost then
+		button.BackgroundColor3 = Color3.fromRGB(22, 82, 52)
+		stroke.Color = Color3.fromRGB(88, 214, 134)
+	else
+		button.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+		stroke.Color = Color3.fromRGB(90, 90, 100)
+	end
+	pitDot.BackgroundColor3 = values.antiPit
+		and Color3.fromRGB(228, 178, 84)
+		or Color3.fromRGB(70, 70, 78)
+	tip.Text = "Ghost: " .. (values.ghost and "ON" or "OFF")
+		.. "  |  AntiPIT: " .. (values.antiPit and "ON" or "OFF")
+end
+
+-- ===== 2. Vehicle Anti-Collision (ghost) =====
+local ghostRunning = false
+local constraints = {}
+
+local function destroyConstraint(c)
+	constraints[c] = nil
+	if c and c.Parent then c:Destroy() end
+end
+
+local function clearConstraints()
+	for c in pairs(constraints) do
+		pcall(destroyConstraint, c)
+	end
+	table.clear(constraints)
+end
+
+local function getVehiclesFolder()
+	return Workspace:FindFirstChild("Vehicles")
+end
+
+local function getCurrentVehicle()
+	local ch = player.Character
+	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+	local seat = hum and hum.SeatPart
+	local vehicles = getVehiclesFolder()
+	if not seat or not seat:IsA("VehicleSeat") or not vehicles then return nil end
+	local obj = seat
+	while obj and obj.Parent ~= vehicles do obj = obj.Parent end
+	if obj and obj.Parent == vehicles and obj:IsA("Model") then return obj end
+	return nil
+end
+
+local function addBaseParts(container, out)
+	if not container then return end
+	for _, o in ipairs(container:GetDescendants()) do
+		if o:IsA("BasePart") then table.insert(out, o) end
+	end
+end
+
+local function addWheelColliders(wheels, out)
+	if not wheels then return end
+	for _, w in ipairs(wheels:GetChildren()) do
+		local c = w:FindFirstChild("Collider")
+		if c and c:IsA("BasePart") then table.insert(out, c) end
+	end
+end
+
+local function getVehicleColliders(vehicle)
+	local res = {}
+	local body = vehicle and vehicle:FindFirstChild("Body")
+	if not body then return res end
+	addBaseParts(body:FindFirstChild("Colliders"), res)
+	addWheelColliders(vehicle:FindFirstChild("Wheels"), res)
+	local trailer = body:FindFirstChild("Trailer")
+	if trailer then
+		addBaseParts(trailer:FindFirstChild("Colliders"), res)
+		addWheelColliders(trailer:FindFirstChild("Wheels"), res)
+	end
+	return res
+end
+
+local function reconcileGhost()
+	if not ghostRunning then return end
+	local vehicles = getVehiclesFolder()
+	local own = getCurrentVehicle()
+	if not vehicles or not own then
+		clearConstraints()
+		return
+	end
+	local ownParts = getVehicleColliders(own)
+	local desired = {}
+	for _, other in ipairs(vehicles:GetChildren()) do
+		if other:IsA("Model") and other ~= own then
+			local otherParts = getVehicleColliders(other)
+			for _, op in ipairs(ownParts) do
+				if op.Parent then
+					local map = desired[op]
+					if not map then map = {} desired[op] = map end
+					for _, tp in ipairs(otherParts) do
+						if tp.Parent then map[tp] = true end
+					end
+				end
+			end
+		end
+	end
+	for c in pairs(constraints) do
+		local map = c.Part0 and desired[c.Part0]
+		if not map or not map[c.Part1] then
+			destroyConstraint(c)
+		else
+			map[c.Part1] = nil
+		end
+	end
+	for op, map in pairs(desired) do
+		for tp in pairs(map) do
+			local c = Instance.new("NoCollisionConstraint")
+			c.Name = "__VehicleGhost"
+			c.Part0 = op
+			c.Part1 = tp
+			c.Parent = op
+			constraints[c] = true
+		end
+	end
+end
+
+startGhost = function()
+	if ghostRunning then return true end
+	ghostRunning = true
+	task.spawn(function()
+		while ghostRunning do
+			pcall(reconcileGhost)
+			task.wait(0.25)
+		end
+	end)
+	return true
+end
+
+stopGhost = function()
+	ghostRunning = false
+	clearConstraints()
+	return true
+end
+
+-- ===== 3. Anti PIT =====
+local pitRunning = false
+local disabledPit = {}
+
+local function disableSignalConnections(signal, registry)
+	local resolved = getconnections
+	if type(resolved) ~= "function" then
+		local ok, v = pcall(function()
+			return (getgenv and getgenv().getconnections) or _G.getconnections
+		end)
+		resolved = ok and v or nil
+	end
+	if type(resolved) ~= "function" then
+		return false, "getconnections unavailable"
+	end
+	local ok, cons = pcall(resolved, signal)
+	if not ok or type(cons) ~= "table" then
+		return false, "Cannot inspect event connections"
+	end
+	for _, c in ipairs(cons) do
+		if not registry[c] then
+			local disabled = pcall(function() c:Disable() end)
+			if disabled then registry[c] = true end
+		end
+	end
+	return true
+end
+
+local function refreshAntiPit()
+	local remotes = ReplicatedStorage:FindFirstChild("__remotes")
+	local vs = remotes and remotes:FindFirstChild("VehicleService")
+	local remote = vs and vs:FindFirstChild("VehiclePitManeuver")
+	if not remote or not remote:IsA("RemoteEvent") then
+		return false, "VehiclePitManeuver remote not found"
+	end
+	return disableSignalConnections(remote.OnClientEvent, disabledPit)
+end
+
+startAntiPit = function()
+	if pitRunning then return true end
+	local ok, err = refreshAntiPit()
+	if not ok then
+		return false, err
+	end
+	pitRunning = true
+	task.delay(0.75, function()
+		if pitRunning then refreshAntiPit() end
+	end)
+	return true
+end
+
+stopAntiPit = function()
+	pitRunning = false
+	for c in pairs(disabledPit) do
+		pcall(function() c:Enable() end)
+		disabledPit[c] = nil
+	end
+	return true
+end
+
+-- ===== Драг + клики =====
+local dragging, dragStart, startPos
+
+local function onPress(input, isRight)
+	dragging = true
+	dragStart = input.Position
+	startPos = button.Position
+	local moved = false
+
+	local cc
+	cc = input.Changed:Connect(function()
+		if input.UserInputState ~= Enum.UserInputState.End then return end
+		dragging = false
+		cc:Disconnect()
+		if moved then return end
+		if isRight then
+			values.antiPit = not values.antiPit
+			if values.antiPit then
+				local ok, err = startAntiPit()
+				if not ok then
+					values.antiPit = false
+					warn("[CarunoGhostBtn] AntiPIT: " .. tostring(err))
+				end
+			else
+				stopAntiPit()
+			end
+		else
+			values.ghost = not values.ghost
+			if values.ghost then startGhost() else stopGhost() end
+		end
+		refresh()
+	end)
+
+	local mc
+	mc = UserInputService.InputChanged:Connect(function(mi)
+		if not dragging then mc:Disconnect() return end
+		if mi.UserInputType ~= Enum.UserInputType.MouseMovement
+			and mi.UserInputType ~= Enum.UserInputType.Touch then return end
+		local d = mi.Position - dragStart
+		if math.abs(d.X) > 3 or math.abs(d.Y) > 3 then moved = true end
+		button.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + d.X,
+			startPos.Y.Scale, startPos.Y.Offset + d.Y
+		)
+	end)
+end
+
+button.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		onPress(input, false)
+	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+		onPress(input, true)
+	end
+end)
+
+button.MouseEnter:Connect(function()
+	tip.Visible = true
+	refresh()
+end)
+button.MouseLeave:Connect(function()
+	tip.Visible = false
+end)
+
+-- ===== API =====
+_G.CarunoGhostBtn = {
+	Destroy = function()
+		stopGhost()
+		stopAntiPit()
+		gui:Destroy()
+		_G.CarunoGhostBtn = nil
+	end,
+	ToggleGhost = function()
+		values.ghost = not values.ghost
+		if values.ghost then startGhost() else stopGhost() end
+		refresh()
+	end,
+	ToggleAntiPit = function()
+		values.antiPit = not values.antiPit
+		if values.antiPit then startAntiPit() else stopAntiPit() end
+		refresh()
+	end,
+	IsGhostOn = function() return values.ghost end,
+	IsAntiPitOn = function() return values.antiPit end,
+}
+
+refresh()
+return _G.CarunoGhostBtn
